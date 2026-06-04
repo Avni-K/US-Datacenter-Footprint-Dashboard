@@ -1,23 +1,23 @@
-import { useState, useMemo, useRef } from 'react';
+import { useDeferredValue, useState, useMemo, useRef } from 'react';
 import * as d3 from 'd3';
 import { useHuc8Data } from '../hooks/useHuc8Data';
 import type { Huc8Feature } from '../hooks/useHuc8Data';
-import type { Huc8MetricKey, Huc8MetricOption, Huc8Row } from '../types';
-import { formatFull, formatCompact } from '../utils/format';
+import type { Huc8MetricKey, Huc8Row } from '../types';
+import { formatFull } from '../utils/format';
 
 const MAP_W = 960;
 const MAP_H = 580;
 
-const HUC8_METRICS: Huc8MetricOption[] = [
-  { key: 'WSF_PCA_m3eq',    label: 'Scarcity Footprint', unit: 'm³-eq' },
-  { key: 'WF_PCA_m3',       label: 'Water Footprint',    unit: 'm³'    },
-  { key: 'CF_PCA_tonsCO2e', label: 'Carbon Footprint',   unit: 'tCO₂e' },
+const HUC8_COMPOSITE_METRICS: { key: Huc8MetricKey; label: string; color: string }[] = [
+  { key: 'WSF_PCA_m3eq',    label: 'Scarcity', color: 'rgb(124, 58, 237)' },
+  { key: 'WF_PCA_m3',       label: 'Water',    color: 'rgb(8, 145, 178)' },
+  { key: 'CF_PCA_tonsCO2e', label: 'Carbon',   color: 'rgb(196, 57, 44)' },
 ];
 
-const COLOR_INTERP: Record<Huc8MetricKey, (t: number) => string> = {
-  WSF_PCA_m3eq:    d3.interpolatePurples,
-  WF_PCA_m3:       d3.interpolateBlues,
-  CF_PCA_tonsCO2e: d3.interpolateOrRd,
+const DEFAULT_HUC8_WEIGHTS: Record<Huc8MetricKey, number> = {
+  WSF_PCA_m3eq: 34,
+  WF_PCA_m3: 33,
+  CF_PCA_tonsCO2e: 33,
 };
 
 function getHuc8Code(props: Record<string, unknown>): string {
@@ -76,10 +76,15 @@ function pctile(sorted: number[], p: number): number {
 
 export function Huc8ScarcityMap() {
   const { rows, features, geoMissing, loading, dataByHuc8 } = useHuc8Data();
-  const [metric, setMetric] = useState<Huc8MetricOption>(HUC8_METRICS[0]);
+  const [weights, setWeights] = useState<Record<Huc8MetricKey, number>>(DEFAULT_HUC8_WEIGHTS);
+  const [focusCount, setFocusCount] = useState(100);
+  const [selectedHuc8, setSelectedHuc8] = useState<string | null>(null);
+  const [hoveredHuc8, setHoveredHuc8] = useState<string | null>(null);
   const [hovered, setHovered] = useState<Huc8Row | null>(null);
   const [cursor, setCursor] = useState({ x: 0, y: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
+  const deferredWeights = useDeferredValue(weights);
+  const deferredFocusCount = useDeferredValue(focusCount);
 
   /**
    * Build projection using geoAlbersUsa.
@@ -117,40 +122,69 @@ export function Huc8ScarcityMap() {
     return { pathGen: gen, matchedFeatures: matched };
   }, [features, dataByHuc8, rows.length]);
 
-  /**
-   * Percentile-clipped color scale.
-   *
-   * Raw max values can be 100–200× larger than p98 (one or two extreme basins),
-   * which compresses all colors to near-white when domain=[0, max].
-   * Clamping at p98 ensures visible color variation across the map.
-   */
-  const { colorScale, domain } = useMemo(() => {
-    const sorted = rows
-      .map(r => r[metric.key])
-      .filter(Number.isFinite)
-      .sort((a, b) => a - b);
-    const lo = pctile(sorted, 0.02);
-    const hi = pctile(sorted, 0.98);
-    const dom: [number, number] = [lo, hi > lo ? hi : lo + 1];
-    return {
-      colorScale: d3
-        .scaleSequential(COLOR_INTERP[metric.key])
-        .domain(dom)
-        .clamp(true),
-      domain: dom,
+  const renderedFeatures = useMemo(() => {
+    if (!pathGen) {
+      return [] as { huc8code: string; row: Huc8Row | undefined; d: string }[];
+    }
+
+    return matchedFeatures.flatMap((f, i) => {
+      const huc8code = getHuc8Code(f.properties);
+      const row = dataByHuc8.get(huc8code);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const d = cleanPath(pathGen(f as any));
+      return d ? [{ huc8code: huc8code || String(i), row, d }] : [];
+    });
+  }, [dataByHuc8, matchedFeatures, pathGen]);
+
+  const composite = useMemo(() => {
+    const domains = new Map<Huc8MetricKey, [number, number]>();
+    for (const { key } of HUC8_COMPOSITE_METRICS) {
+      const sorted = rows
+        .map(r => r[key])
+        .filter(Number.isFinite)
+        .sort((a, b) => a - b);
+      const lo = pctile(sorted, 0.02);
+      const hi = pctile(sorted, 0.98);
+      domains.set(key, [lo, hi > lo ? hi : lo + 1]);
+    }
+
+    const normalizedFor = (row: Huc8Row, key: Huc8MetricKey) => {
+      const [lo, hi] = domains.get(key) ?? [0, 1];
+      return Math.max(0, Math.min(1, (row[key] - lo) / (hi - lo)));
     };
-  }, [rows, metric]);
+
+    const weightTotal = d3.sum(HUC8_COMPOSITE_METRICS, ({ key }) => deferredWeights[key]);
+    const normalizedWeightFor = (key: Huc8MetricKey) =>
+      weightTotal > 0 ? deferredWeights[key] / weightTotal : 1 / HUC8_COMPOSITE_METRICS.length;
+
+    const scoreFor = (row: Huc8Row) =>
+      d3.sum(
+        HUC8_COMPOSITE_METRICS,
+        ({ key }) => normalizedFor(row, key) * normalizedWeightFor(key),
+      );
+
+    const maxScore = d3.max(rows, scoreFor) ?? 1;
+    const colorScale = d3
+      .scaleSequential(d3.interpolateYlGnBu)
+      .domain([0, maxScore || 1])
+      .clamp(true);
+    const focusedHuc8s = new Set(
+      [...rows]
+        .sort((a, b) => scoreFor(b) - scoreFor(a))
+        .slice(0, deferredFocusCount)
+        .map(row => row.HUC8),
+    );
+
+    return { fillFor: (row: Huc8Row) => colorScale(scoreFor(row)), focusedHuc8s, scoreFor };
+  }, [deferredFocusCount, deferredWeights, rows]);
 
   const top10 = useMemo(
     () =>
       [...rows]
-        .filter(r => Number.isFinite(r[metric.key]))
-        .sort((a, b) => b[metric.key] - a[metric.key])
+        .sort((a, b) => composite.scoreFor(b) - composite.scoreFor(a))
         .slice(0, 10),
-    [rows, metric],
+    [rows, composite],
   );
-
-  const gradId = `huc8-grad-${metric.key}`;
 
   if (loading) {
     return (
@@ -165,28 +199,72 @@ export function Huc8ScarcityMap() {
       <div className="siting-header">
         <h2>HUC8 Water Scarcity Hotspot Map</h2>
         <p>
-          Watershed-level environmental footprints for {rows.length.toLocaleString()} HUC8
-          subbasins — color scale clipped at 98th percentile for visibility.
+          Watershed-level scarcity, water, and carbon footprints for{' '}
+          {rows.length.toLocaleString()} HUC8 subbasins in one combined layer.
         </p>
       </div>
 
-      <div className="metric-selector">
-        {HUC8_METRICS.map(m => (
+      <div className="weight-panel">
+        <div className="weight-panel-header">
+          <div className="panel-title">HUC8 Map Weights</div>
           <button
-            key={m.key}
-            className={`metric-btn${m.key === metric.key ? ' active' : ''}`}
-            onClick={() => setMetric(m)}
+            className="weight-reset"
             type="button"
+            onClick={() => {
+              setWeights(DEFAULT_HUC8_WEIGHTS);
+              setFocusCount(100);
+              setSelectedHuc8(null);
+              setHoveredHuc8(null);
+            }}
           >
-            {m.label}
+            Reset
           </button>
-        ))}
+        </div>
+        <div className="weight-grid">
+          {HUC8_COMPOSITE_METRICS.map(metric => {
+            const total = d3.sum(HUC8_COMPOSITE_METRICS, item => weights[item.key]);
+            const normalized = total > 0 ? (weights[metric.key] / total) * 100 : 0;
+            return (
+              <label key={metric.key} className="weight-control">
+                <span className="weight-label">
+                  <span className="weight-dot" style={{ background: metric.color }} />
+                  {metric.label}
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={weights[metric.key]}
+                  onChange={event =>
+                    setWeights(current => ({
+                      ...current,
+                      [metric.key]: Number(event.target.value),
+                    }))
+                  }
+                  style={{ accentColor: metric.color }}
+                />
+                <span className="weight-value">{normalized.toFixed(0)}%</span>
+              </label>
+            );
+          })}
+        </div>
+        <label className="focus-control">
+          <span className="weight-label">Focus Top Basins</span>
+          <input
+            type="range"
+            min={25}
+            max={400}
+            value={focusCount}
+            onChange={event => setFocusCount(Number(event.target.value))}
+          />
+          <span className="weight-value">{focusCount}</span>
+        </label>
       </div>
 
       <div className="huc8-main">
         <div className="map-panel">
           <div className="panel-title">
-            {metric.label} by HUC8 Subbasin ({metric.unit})
+            Combined HUC8 Environmental Footprint
           </div>
 
           {geoMissing ? (
@@ -206,65 +284,54 @@ export function Huc8ScarcityMap() {
                 height={MAP_H}
                 style={{ display: 'block', width: '100%', height: 'auto' }}
               >
-                <defs>
-                  <linearGradient id={gradId} x1="0" x2="1" y1="0" y2="0">
-                    {[0, 0.25, 0.5, 0.75, 1].map(t => (
-                      <stop
-                        key={t}
-                        offset={`${t * 100}%`}
-                        stopColor={colorScale(domain[0] + t * (domain[1] - domain[0]))}
-                      />
-                    ))}
-                  </linearGradient>
-                </defs>
-
                 {/* Map background */}
                 <rect width={MAP_W} height={MAP_H} fill="#e8edf4" />
 
                 <g>
-                  {pathGen &&
-                    matchedFeatures.map((f, i) => {
-                      const huc8code = getHuc8Code(f.properties);
-                      const row = dataByHuc8.get(huc8code);
-                      const value = row?.[metric.key];
-                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                      const d = cleanPath(pathGen(f as any));
-                      if (!d) return null;
+                  {renderedFeatures.map(({ huc8code, row, d }) => {
+                      const activeHuc8 = selectedHuc8 ?? hoveredHuc8;
+                      const isSelected = huc8code === activeHuc8;
+                      const isFocused = row ? composite.focusedHuc8s.has(row.HUC8) : false;
                       return (
                         <path
-                          key={huc8code || i}
+                          key={huc8code}
                           d={d}
-                          fill={
-                            value != null && Number.isFinite(value)
-                              ? colorScale(value)
-                              : '#c8d3e0'
-                          }
+                          fill={row ? composite.fillFor(row) : '#c8d3e0'}
                           stroke="#ffffff"
-                          strokeWidth={0.25}
+                          strokeWidth={isSelected ? 1.6 : 0.25}
                           fillOpacity={0.95}
-                          onMouseEnter={() => setHovered(row ?? null)}
-                          onMouseLeave={() => setHovered(null)}
+                          className={`${isSelected ? 'selected' : ''}${row && !isFocused ? ' muted' : ''}`}
+                          onMouseEnter={() => {
+                            setHovered(row ?? null);
+                            setHoveredHuc8(row?.HUC8 ?? null);
+                          }}
+                          onMouseLeave={() => {
+                            setHovered(null);
+                            setHoveredHuc8(null);
+                          }}
+                          onClick={() => {
+                            if (!row) return;
+                            setSelectedHuc8(row.HUC8 === selectedHuc8 ? null : row.HUC8);
+                          }}
                         />
                       );
                     })}
                 </g>
 
-                {/* Color legend */}
                 <g transform={`translate(30,${MAP_H - 34})`}>
                   <rect
-                    x={-4} y={-18} width={230} height={44}
+                    x={-4} y={-18} width={250} height={44}
                     fill="rgba(255,255,255,0.82)" rx={4}
                   />
                   <text x={0} y={-4} fontSize={10} fill="#555" textAnchor="start">
-                    {metric.label} ({metric.unit}) — p2 to p98
+                    Combined layer, each metric clipped p2 to p98
                   </text>
-                  <rect width={200} height={10} fill={`url(#${gradId})`} rx={2} />
-                  <text x={0} y={22} fontSize={10} fill="#555" textAnchor="start">
-                    {formatCompact(domain[0])}
-                  </text>
-                  <text x={200} y={22} fontSize={10} fill="#555" textAnchor="end">
-                    {formatCompact(domain[1])}
-                  </text>
+                  {HUC8_COMPOSITE_METRICS.map((item, i) => (
+                    <g key={item.key} transform={`translate(${i * 78},17)`}>
+                      <circle r={5} cx={5} cy={0} fill={item.color} />
+                      <text x={16} y={4} fontSize={10} fill="#555">{item.label}</text>
+                    </g>
+                  ))}
                 </g>
               </svg>
 
@@ -272,14 +339,17 @@ export function Huc8ScarcityMap() {
                 <div
                   className="map-tooltip huc8-tooltip"
                   style={{
-                    left:
-                      cursor.x > (containerRef.current?.clientWidth ?? 900) - 220
-                        ? cursor.x - 210
-                        : cursor.x + 14,
+                    left: cursor.x > 690 ? cursor.x - 210 : cursor.x + 14,
                     top: Math.max(cursor.y - 130, 4),
                   }}
                 >
                   <div className="tt-state">HUC8: {hovered.HUC8}</div>
+                  <div className="tt-row">
+                    <span className="tt-label">Combined</span>
+                    <span className="tt-val">
+                      {(composite.scoreFor(hovered) * 100).toFixed(1)} score
+                    </span>
+                  </div>
                   <div className="tt-row">
                     <span className="tt-label">Region</span>
                     <span className="tt-val">{hovered.Region}</span>
@@ -307,23 +377,35 @@ export function Huc8ScarcityMap() {
         </div>
 
         <div className="table-panel huc8-table-panel">
-          <div className="panel-title">Top 10 Hotspots — {metric.label}</div>
+          <div className="panel-title">Top 10 Hotspots — Combined Footprint</div>
           <table className="ranking-table">
             <thead>
               <tr>
                 <th>#</th>
                 <th>HUC8</th>
                 <th>Region</th>
-                <th className="rank-val">{metric.unit}</th>
+                <th className="rank-val">Score</th>
               </tr>
             </thead>
             <tbody>
               {top10.map((r, i) => (
-                <tr key={r.HUC8}>
+                <tr
+                  key={r.HUC8}
+                  className={r.HUC8 === (selectedHuc8 ?? hoveredHuc8) ? 'linked-row selected' : 'linked-row'}
+                  onMouseEnter={() => {
+                    setHovered(r);
+                    setHoveredHuc8(r.HUC8);
+                  }}
+                  onMouseLeave={() => {
+                    setHovered(null);
+                    setHoveredHuc8(null);
+                  }}
+                  onClick={() => setSelectedHuc8(r.HUC8 === selectedHuc8 ? null : r.HUC8)}
+                >
                   <td className="rank-num">{i + 1}</td>
                   <td className="siting-huc8">{r.HUC8}</td>
                   <td className="huc8-region">{r.Region}</td>
-                  <td className="rank-val">{formatFull(r[metric.key])}</td>
+                  <td className="rank-val">{(composite.scoreFor(r) * 100).toFixed(1)}</td>
                 </tr>
               ))}
             </tbody>
