@@ -45,3 +45,31 @@ export interface Huc8MetricOption {
   label: string;
   unit: string;
 }
+
+export interface DatacenterCountRow {
+  State: string;
+  datacenter_count_2021: number;
+  datacenter_count_2025: number;
+  total_facility_area_sqft_2025: number | null;
+  datacenter_growth_2021_2025: number;
+  datacenter_growth_pct_2021_2025: number | null;
+}
+
+export type GrowthMetricKey =
+  | 'datacenter_count_2021'
+  | 'datacenter_count_2025'
+  | 'datacenter_growth_2021_2025'
+  | 'datacenter_growth_pct_2021_2025';
+
+export interface DatacenterLocation {
+  osm_id: string;
+  name: string;
+  operator: string;
+  building: string;
+  telecom: string;
+  city: string;
+  state: string;
+  source_layer: string;
+  lat: number;
+  lon: number;
+}
