@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, type MouseEvent } from 'react';
 import * as d3 from 'd3';
 import { feature as topoFeature } from 'topojson-client';
 import type { DatacenterCountRow, DatacenterLocation, StateRow, MetricKey } from '../types';
@@ -17,7 +17,10 @@ const COMPOSITE_LEGEND = [
   { label: 'Carbon', color: 'rgb(124, 58, 237)' },
 ];
 
-type MapLens = 'footprint' | 'growth' | 'density' | 'water' | 'carbon' | 'risk';
+const STATE_SCORE_COLORS = ['#fff2bf', '#fed976', '#fdae42', '#f97316', '#dc2626', '#7f001d'];
+const DC_2021_COLOR = '#f59e0b';
+const DC_2025_COLOR = '#14b8a6';
+const STAR_PATH = d3.symbol().type(d3.symbolStar).size(72)() ?? '';
 
 interface Props {
   data: StateRow[];
@@ -31,12 +34,7 @@ interface Props {
   onTogglePortfolioState: (state: string) => void;
   datacenterLocations: (DatacenterLocation & { overlayYear: '2021' | '2025' })[];
   datacenterCountsByState: Map<string, DatacenterCountRow>;
-  lens: MapLens;
-  timelineYear: number;
-  whatIfNewCenters: number;
-  whatIfEfficiency: number;
   drilldownState: string | null;
-  lassoMode: boolean;
   onSetSelectedStates: (states: string[]) => void;
   onDrilldownState: (state: string | null) => void;
 }
@@ -53,12 +51,7 @@ export function ChoroplethMap({
   onTogglePortfolioState,
   datacenterLocations,
   datacenterCountsByState,
-  lens,
-  timelineYear,
-  whatIfNewCenters,
-  whatIfEfficiency,
   drilldownState,
-  lassoMode,
   onSetSelectedStates,
   onDrilldownState,
 }: Props) {
@@ -68,9 +61,9 @@ export function ChoroplethMap({
   const [hovered, setHovered] = useState<StateRow | null>(null);
   const [hoveredCenter, setHoveredCenter] = useState<(DatacenterLocation & { overlayYear: '2021' | '2025' }) | null>(null);
   const [cursor, setCursor] = useState({ x: 0, y: 0 });
-  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
-  const [dragCurrent, setDragCurrent] = useState<{ x: number; y: number } | null>(null);
-  const [showLabels, setShowLabels] = useState(false);
+  const [lassoStart, setLassoStart] = useState<{ x: number; y: number } | null>(null);
+  const [lassoCurrent, setLassoCurrent] = useState<{ x: number; y: number } | null>(null);
+  const blockNextClickRef = useRef(false);
 
   useEffect(() => {
     fetch('/data/states-10m.json')
@@ -116,47 +109,14 @@ export function ChoroplethMap({
     const normalizedWeightFor = (key: MetricKey) =>
       weightTotal > 0 ? weights[key] / weightTotal : 1 / keys.length;
 
-    const centerCountFor = (state: string) => {
-      const counts = datacenterCountsByState.get(state);
-      if (counts) {
-        const ratio = Math.max(0, Math.min(1, (timelineYear - 2021) / 4));
-        return counts.datacenter_count_2021 +
-          (counts.datacenter_count_2025 - counts.datacenter_count_2021) * ratio +
-          (selectedStates.includes(state) ? whatIfNewCenters : 0);
-      }
-      const actualCount = datacenterLocations.filter(loc => loc.state === state).length;
-      return actualCount + (selectedStates.includes(state) ? whatIfNewCenters : 0);
-    };
-
-    const growthMax = d3.max(data, row => Math.max(0, centerCountFor(row.State))) ?? 1;
-    const densityMax = d3.max(data, row => centerCountFor(row.State) / Math.max(1, row.Scaled_power_consumption_MWh / 1_000_000)) ?? 1;
-    const waterMax = d3.max(data, row => row.Water_intensity_m3_per_MWh) ?? 1;
-    const carbonMax = d3.max(data, row => row.Carbon_intensity_tonsCO2e_per_MWh) ?? 1;
-
-    const footprintScoreFor = (row: StateRow) =>
+    const scoreFor = (row: StateRow) =>
       d3.sum(keys, key => {
-        const efficiencyFactor = selectedStates.includes(row.State) ? (1 - whatIfEfficiency / 100) : 1;
-        return ((row[key] * efficiencyFactor) / (maxByKey.get(key) || 1)) * normalizedWeightFor(key);
+        return (row[key] / (maxByKey.get(key) || 1)) * normalizedWeightFor(key);
       });
-
-    const scoreFor = (row: StateRow) => {
-      const footprintScore = footprintScoreFor(row);
-      const growthScore = centerCountFor(row.State) / (growthMax || 1);
-      const densityScore = (centerCountFor(row.State) / Math.max(1, row.Scaled_power_consumption_MWh / 1_000_000)) / (densityMax || 1);
-      const waterScore = row.Water_intensity_m3_per_MWh / (waterMax || 1);
-      const carbonScore = row.Carbon_intensity_tonsCO2e_per_MWh / (carbonMax || 1);
-
-      if (lens === 'growth') return growthScore;
-      if (lens === 'density') return densityScore;
-      if (lens === 'water') return waterScore;
-      if (lens === 'carbon') return carbonScore;
-      if (lens === 'risk') return (footprintScore * 0.45) + (growthScore * 0.25) + (waterScore * 0.15) + (carbonScore * 0.15);
-      return footprintScore;
-    };
 
     const maxScore = d3.max(data, scoreFor) ?? 1;
     const colorScale = d3
-      .scaleSequential(d3.interpolateYlOrRd)
+      .scaleSequential(d3.interpolateRgbBasis(STATE_SCORE_COLORS))
       .domain([0, maxScore || 1])
       .clamp(true);
     const focusedStates = new Set(
@@ -166,33 +126,16 @@ export function ChoroplethMap({
         .map(row => row.State),
     );
 
-    const legendLabel =
-      lens === 'growth' ? 'Data center growth pressure' :
-      lens === 'density' ? 'Facilities per energy demand' :
-      lens === 'water' ? 'Water intensity exposure' :
-      lens === 'carbon' ? 'Carbon intensity exposure' :
-      lens === 'risk' ? 'Combined operational risk' :
-      COMBINED_LABEL;
-
     return {
       fillFor: (row: StateRow) => colorScale(scoreFor(row)),
       scoreFor,
       focusedStates,
       maxScore,
-      centerCountFor,
-      legendLabel,
     };
   }, [
     data,
-    datacenterCountsByState,
-    datacenterLocations,
     focusCount,
-    lens,
-    selectedStates,
-    timelineYear,
     weights,
-    whatIfEfficiency,
-    whatIfNewCenters,
   ]);
 
   const centerDots = useMemo(() => {
@@ -205,14 +148,42 @@ export function ChoroplethMap({
       .filter(Boolean) as { loc: DatacenterLocation & { overlayYear: '2021' | '2025' }; x: number; y: number }[];
   }, [datacenterLocations, proj]);
 
-  const brushRect = dragStart && dragCurrent
+  const stateCallouts = useMemo(() => {
+    return featureMeta
+      .map(({ state, row, centroid }) => {
+        if (!state || !row || !centroid || isNaN(centroid[0]) || isNaN(centroid[1])) return null;
+        const counts = datacenterCountsByState.get(state);
+        if (!counts) return null;
+        const visible =
+          selectedStates.includes(state) ||
+          state === selectedState ||
+          state === drilldownState;
+        return visible ? { state, row, centroid, counts } : null;
+      })
+      .filter(Boolean) as {
+        state: string;
+        row: StateRow;
+        centroid: [number, number];
+        counts: DatacenterCountRow;
+      }[];
+  }, [datacenterCountsByState, drilldownState, featureMeta, selectedState, selectedStates]);
+
+  const lassoRect = lassoStart && lassoCurrent
     ? {
-        x: Math.min(dragStart.x, dragCurrent.x),
-        y: Math.min(dragStart.y, dragCurrent.y),
-        width: Math.abs(dragCurrent.x - dragStart.x),
-        height: Math.abs(dragCurrent.y - dragStart.y),
+        x: Math.min(lassoStart.x, lassoCurrent.x),
+        y: Math.min(lassoStart.y, lassoCurrent.y),
+        width: Math.abs(lassoCurrent.x - lassoStart.x),
+        height: Math.abs(lassoCurrent.y - lassoStart.y),
       }
     : null;
+
+  const svgPoint = (event: MouseEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * (MAP_W / rect.width),
+      y: (event.clientY - rect.top) * (MAP_H / rect.height),
+    };
+  };
 
   if (!statesFeatures || !pathGen) {
     return <div className="map-loading">Loading map…</div>;
@@ -226,46 +197,52 @@ export function ChoroplethMap({
         const rect = e.currentTarget.getBoundingClientRect();
         const nextCursor = { x: e.clientX - rect.left, y: e.clientY - rect.top };
         setCursor(nextCursor);
-        if (dragStart) {
-          setDragCurrent({
-            x: nextCursor.x * (MAP_W / rect.width),
-            y: nextCursor.y * (MAP_H / rect.height),
-          });
-        }
-      }}
-      onMouseUp={() => {
-        if (lassoMode && brushRect && brushRect.width > 10 && brushRect.height > 10) {
-          const statesInBrush = featureMeta
-            .filter(({ centroid }) =>
-              centroid[0] >= brushRect.x &&
-              centroid[0] <= brushRect.x + brushRect.width &&
-              centroid[1] >= brushRect.y &&
-              centroid[1] <= brushRect.y + brushRect.height,
-            )
-            .map(item => item.state)
-            .filter(Boolean) as string[];
-          if (statesInBrush.length > 0) {
-            onSetSelectedStates(Array.from(new Set([...selectedStates, ...statesInBrush])));
-            onSelectState(statesInBrush[statesInBrush.length - 1]);
-          }
-        }
-        setDragStart(null);
-        setDragCurrent(null);
       }}
     >
       <svg
         viewBox={`0 0 ${MAP_W} ${MAP_H}`}
         onMouseDown={event => {
-          if (!lassoMode) return;
-          const rect = event.currentTarget.getBoundingClientRect();
-          const sx = MAP_W / rect.width;
-          const sy = MAP_H / rect.height;
-          const point = {
-            x: (event.clientX - rect.left) * sx,
-            y: (event.clientY - rect.top) * sy,
-          };
-          setDragStart(point);
-          setDragCurrent(point);
+          if (event.button !== 0) return;
+          const point = svgPoint(event);
+          setLassoStart(point);
+          setLassoCurrent(point);
+        }}
+        onMouseMove={event => {
+          if (!lassoStart) return;
+          setLassoCurrent(svgPoint(event));
+        }}
+        onMouseUp={() => {
+          if (!lassoRect) return;
+          if (lassoRect.width > 14 && lassoRect.height > 14) {
+            blockNextClickRef.current = true;
+            window.setTimeout(() => {
+              blockNextClickRef.current = false;
+            }, 0);
+            const statesInBrush = featureMeta
+              .filter(({ state, row, centroid }) =>
+                state &&
+                row &&
+                centroid &&
+                centroid[0] >= lassoRect.x &&
+                centroid[0] <= lassoRect.x + lassoRect.width &&
+                centroid[1] >= lassoRect.y &&
+                centroid[1] <= lassoRect.y + lassoRect.height,
+              )
+              .map(item => item.state)
+              .filter(Boolean) as string[];
+
+            if (statesInBrush.length > 0) {
+              const nextStates = Array.from(new Set([...selectedStates, ...statesInBrush]));
+              onSetSelectedStates(nextStates);
+              onSelectState(statesInBrush[statesInBrush.length - 1]);
+            }
+          }
+          setLassoStart(null);
+          setLassoCurrent(null);
+        }}
+        onMouseLeave={() => {
+          setLassoStart(null);
+          setLassoCurrent(null);
         }}
       >
         <defs>
@@ -274,7 +251,7 @@ export function ChoroplethMap({
               <stop
                 key={t}
                 offset={`${t * 100}%`}
-                stopColor={d3.interpolateYlOrRd(t)}
+                stopColor={d3.interpolateRgbBasis(STATE_SCORE_COLORS)(t)}
               />
             ))}
           </linearGradient>
@@ -296,14 +273,14 @@ export function ChoroplethMap({
                 d={pathGen(f as any) ?? ''}
                 data-state={row?.State}
                 fill={row ? composite.fillFor(row) : '#dde3ed'}
-                stroke="#fff"
-                strokeWidth={isSelected || isPortfolio ? 2.5 : 0.5}
+                stroke={isSelected || isPortfolio ? undefined : '#cbd5e1'}
+                strokeWidth={isSelected || isPortfolio ? 2.5 : 0.85}
                 className={`state-path${row ? ' has-data' : ''}${isSelected ? ' selected' : ''}${isPortfolio ? ' portfolio' : ''}${isDrilldown ? ' drilldown' : ''}${row && !isFocused && !isPortfolio && !isDrilldown ? ' muted' : ''}`}
                 onMouseEnter={() => setHovered(row ?? null)}
                 onMouseLeave={() => setHovered(null)}
                 onClick={() => {
                   if (!row) return;
-                  if (lassoMode) return;
+                  if (blockNextClickRef.current) return;
                   const isRemovingPinnedState = selectedStates.includes(row.State) && row.State === selectedState;
                   onTogglePortfolioState(row.State);
                   onSelectState(isRemovingPinnedState ? null : row.State);
@@ -318,42 +295,65 @@ export function ChoroplethMap({
           })}
         </g>
 
-          {showLabels && (
+        {stateCallouts.length > 0 && (
           <g className="state-labels-layer">
-            {featureMeta.map(({ state, row, centroid }) => {
-              if (!row || !state || !centroid || isNaN(centroid[0]) || isNaN(centroid[1])) return null;
+            {stateCallouts.map(({ state, row, centroid, counts }) => {
               const score = composite.scoreFor(row);
-              const isFocused = composite.focusedStates.has(state);
+              const growth = counts.datacenter_count_2025 - counts.datacenter_count_2021;
+              const selected = selectedStates.includes(state) || state === activeState;
               return (
-                <g key={`label-${state}`} transform={`translate(${centroid[0]},${centroid[1]})`} className="state-label-group">
+                <g key={`label-${state}`} transform={`translate(${centroid[0]},${centroid[1]})`} className={`state-label-group dc-callout${selected ? ' selected' : ''}`}>
                   <rect
-                    x={-18} y={-18}
-                    width={36} height={28}
-                    rx={4}
-                    fill={composite.fillFor(row)}
-                    fillOpacity={0.88}
-                    stroke="#fff"
-                    strokeWidth={1}
+                    x={-32} y={-30}
+                    width={64} height={50}
+                    rx={5}
+                    fill="rgba(15,23,42,0.88)"
+                    stroke={selected ? '#facc15' : '#fff'}
+                    strokeWidth={selected ? 1.8 : 0.8}
                   />
                   <text
                     textAnchor="middle"
-                    fontSize={isFocused ? 10 : 8}
-                    fontWeight={isFocused ? 700 : 500}
+                    fontSize={11}
+                    fontWeight={800}
                     fill="#fff"
-                    y={-4}
+                    y={-16}
                     style={{ pointerEvents: 'none', userSelect: 'none' }}
                   >
-                    {state}
+                    {state} {score > 0 ? `${(score * 100).toFixed(0)}` : ''}
+                  </text>
+                  <path d={STAR_PATH} transform="translate(-20,0) scale(0.72)" fill={DC_2021_COLOR} stroke="#fff7ed" strokeWidth={1.2} />
+                  <text
+                    textAnchor="start"
+                    fontSize={10}
+                    fontWeight={800}
+                    fill="#fff"
+                    x={-10}
+                    y={4}
+                    style={{ pointerEvents: 'none', userSelect: 'none' }}
+                  >
+                    {counts.datacenter_count_2021}
+                  </text>
+                  <rect x={8} y={-7} width={11} height={11} rx={1.5} fill={DC_2025_COLOR} stroke="#ecfeff" strokeWidth={1} />
+                  <text
+                    textAnchor="start"
+                    fontSize={10}
+                    fontWeight={800}
+                    fill="#fff"
+                    x={24}
+                    y={4}
+                    style={{ pointerEvents: 'none', userSelect: 'none' }}
+                  >
+                    {counts.datacenter_count_2025}
                   </text>
                   <text
                     textAnchor="middle"
-                    fontSize={isFocused ? 9 : 7.5}
-                    fontWeight={400}
-                    fill="#fff"
-                    y={8}
+                    fontSize={8}
+                    fontWeight={700}
+                    fill={growth >= 0 ? '#bbf7d0' : '#fecaca'}
+                    y={16}
                     style={{ pointerEvents: 'none', userSelect: 'none' }}
                   >
-                    {(score * 100).toFixed(0)}
+                    {growth >= 0 ? '+' : ''}{growth} DCs
                   </text>
                 </g>
               );
@@ -362,29 +362,60 @@ export function ChoroplethMap({
         )}
 
         {centerDots.length > 0 && (
-          <g>
-            {centerDots.map(({ loc, x, y }) => (
-              <circle
-                key={`${loc.overlayYear}-${loc.osm_id}-${x}-${y}`}
-                cx={x}
-                cy={y}
-                r={loc.overlayYear === '2025' ? 3.4 : 2.8}
-                fill={loc.overlayYear === '2025' ? '#0f766e' : '#2563eb'}
-                fillOpacity={0.72}
-                stroke="#fff"
-                strokeWidth={0.7}
-                className="center-dot"
-                onMouseEnter={() => setHoveredCenter(loc)}
-                onMouseLeave={() => setHoveredCenter(null)}
-              />
-            ))}
+          <g className="dc-marker-layer">
+            {centerDots.map(({ loc, x, y }) => {
+              const key = `${loc.overlayYear}-${loc.osm_id}-${x}-${y}`;
+              const commonHandlers = {
+                onMouseEnter: () => setHoveredCenter(loc),
+                onMouseLeave: () => setHoveredCenter(null),
+              };
+
+              return loc.overlayYear === '2021' ? (
+                <g key={key} className="dc-marker dc-marker-2021" {...commonHandlers}>
+                  <circle cx={x} cy={y} r={6.4} className="dc-marker-halo" />
+                  <path
+                    d={STAR_PATH}
+                    transform={`translate(${x},${y}) scale(0.68)`}
+                    fill={DC_2021_COLOR}
+                    stroke="#111827"
+                    strokeWidth={0.75}
+                    className="center-dot center-dot-2021"
+                  />
+                </g>
+              ) : (
+                <g key={key} className="dc-marker dc-marker-2025" {...commonHandlers}>
+                  <circle cx={x} cy={y} r={6.2} className="dc-marker-halo" />
+                  <rect
+                    x={x - 4}
+                    y={y - 4}
+                    width={8}
+                    height={8}
+                    rx={1.5}
+                    fill={DC_2025_COLOR}
+                    stroke="#111827"
+                    strokeWidth={0.75}
+                    className="center-dot center-dot-2025"
+                  />
+                </g>
+              );
+            })}
           </g>
         )}
 
-        <g transform={`translate(30,${MAP_H - 78})`}>
-          <rect x={-8} y={-24} width={312} height={78} fill="rgba(255,255,255,0.9)" rx={5} />
+        {lassoRect && lassoRect.width > 4 && lassoRect.height > 4 && (
+          <rect
+            className="lasso-rect"
+            x={lassoRect.x}
+            y={lassoRect.y}
+            width={lassoRect.width}
+            height={lassoRect.height}
+          />
+        )}
+
+        <g transform={`translate(30,${MAP_H - 86})`}>
+          <rect x={-8} y={-24} width={330} height={88} fill="rgba(255,255,255,0.92)" rx={5} />
           <text x={0} y={-4} fontSize={10} fill="#555" textAnchor="start">
-            {composite.legendLabel}
+            State color: {COMBINED_LABEL}
           </text>
           <rect x={0} y={8} width={190} height={10} rx={2} fill="url(#state-score-gradient)" />
           <text x={0} y={32} fontSize={10} fill="#555">Low</text>
@@ -397,27 +428,14 @@ export function ChoroplethMap({
               <text x={16} y={4} fontSize={10} fill="#555">{item.label}</text>
             </g>
           ))}
+          <g transform="translate(0,65)">
+            <path d={STAR_PATH} transform="translate(5,0) scale(0.6)" fill={DC_2021_COLOR} stroke="#111827" strokeWidth={0.75} />
+            <text x={16} y={4} fontSize={10} fill="#555">2021 DCs</text>
+            <rect x={82} y={-5} width={10} height={10} rx={1.5} fill={DC_2025_COLOR} stroke="#111827" strokeWidth={0.75} />
+            <text x={99} y={4} fontSize={10} fill="#555">2025 DCs</text>
+          </g>
         </g>
-        {brushRect && (
-          <rect
-            className="lasso-rect"
-            x={brushRect.x}
-            y={brushRect.y}
-            width={brushRect.width}
-            height={brushRect.height}
-          />
-        )}
       </svg>
-
-      <button
-        type="button"
-        className={`map-label-toggle${showLabels ? ' active' : ''}`}
-        onClick={() => setShowLabels(v => !v)}
-      >
-        {showLabels ? '🏷 Labels On' : '🏷 Labels'}
-      </button>
-
-      {lassoMode && <div className="lasso-hint">Drag across the map to add states to the portfolio</div>}
 
       {drilldownState && (
         <div className="drilldown-banner">
