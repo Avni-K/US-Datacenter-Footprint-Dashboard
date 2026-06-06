@@ -357,66 +357,217 @@ function StateCommandBar({
           </div>
         )}
       </div>
-      <NationalBenchmark
+      <StateAnalyticsPanel
         rows={rows}
         benchmarkRows={benchmarkRows}
-        title={benchmarkTitle}
-        scoreFor={scoreFor}
-        countsByState={countsByState}
-      />
-      <DatacenterGrowthImpact
-        rows={rows}
-        benchmarkRows={benchmarkRows}
+        benchmarkTitle={benchmarkTitle}
         activeState={activeState}
+        scoreFor={scoreFor}
         countsByState={countsByState}
       />
     </div>
   );
 }
 
-function NationalBenchmark({
+function StateAnalyticsPanel({
   rows,
   benchmarkRows,
-  title,
+  benchmarkTitle,
+  activeState,
   scoreFor,
   countsByState,
 }: {
   rows: StateRow[];
   benchmarkRows: StateRow[];
-  title: string;
+  benchmarkTitle: string;
+  activeState: string | null;
   scoreFor: (row: StateRow) => number;
   countsByState: Map<string, DatacenterCountRow>;
 }) {
+  // ── Section 1: National benchmark ────────────────────────────────
   const avg = (values: number[]) =>
-    values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
-  const dcRows = rows.map(row => countsByState.get(row.State)).filter(Boolean) as DatacenterCountRow[];
-  const benchmarkDcRows = benchmarkRows.map(row => countsByState.get(row.State)).filter(Boolean) as DatacenterCountRow[];
+    values.length > 0 ? values.reduce((s, v) => s + v, 0) / values.length : 0;
+  const dcRows = rows.map(r => countsByState.get(r.State)).filter(Boolean) as DatacenterCountRow[];
+  const benchmarkDcRows = benchmarkRows.map(r => countsByState.get(r.State)).filter(Boolean) as DatacenterCountRow[];
   const national = {
-    score: avg(rows.map(row => scoreFor(row) * 100)),
-    dc2021: avg(dcRows.map(row => row.datacenter_count_2021)),
-    dc2025: avg(dcRows.map(row => row.datacenter_count_2025)),
-    growth: avg(dcRows.map(row => row.datacenter_growth_2021_2025)),
+    score:  avg(rows.map(r => scoreFor(r) * 100)),
+    dc2021: avg(dcRows.map(r => r.datacenter_count_2021)),
+    dc2025: avg(dcRows.map(r => r.datacenter_count_2025)),
+    growth: avg(dcRows.map(r => r.datacenter_growth_2021_2025)),
+    energy: avg(rows.map(r => r.Scaled_power_consumption_MWh / 1_000_000)),
+    water:  avg(rows.map(r => r.Water_footprint_m3 / 1_000_000)),
+    carbon: avg(rows.map(r => r.Carbon_footprint_tonsCO2e / 1_000)),
   };
   const selected = benchmarkRows.length > 0 ? {
-    score: avg(benchmarkRows.map(row => scoreFor(row) * 100)),
-    dc2021: avg(benchmarkDcRows.map(row => row.datacenter_count_2021)),
-    dc2025: avg(benchmarkDcRows.map(row => row.datacenter_count_2025)),
-    growth: avg(benchmarkDcRows.map(row => row.datacenter_growth_2021_2025)),
+    score:  avg(benchmarkRows.map(r => scoreFor(r) * 100)),
+    dc2021: avg(benchmarkDcRows.map(r => r.datacenter_count_2021)),
+    dc2025: avg(benchmarkDcRows.map(r => r.datacenter_count_2025)),
+    growth: avg(benchmarkDcRows.map(r => r.datacenter_growth_2021_2025)),
+    energy: avg(benchmarkRows.map(r => r.Scaled_power_consumption_MWh / 1_000_000)),
+    water:  avg(benchmarkRows.map(r => r.Water_footprint_m3 / 1_000_000)),
+    carbon: avg(benchmarkRows.map(r => r.Carbon_footprint_tonsCO2e / 1_000)),
   } : null;
-  const selectedLabel = selected ? title : 'No state selected';
+
+  // ── Section 2: Growth impact ──────────────────────────────────────
+  const focusRows = benchmarkRows.length > 0
+    ? benchmarkRows
+    : activeState ? rows.filter(r => r.State === activeState) : [];
+  const estimateRows = focusRows.map(row => {
+    const counts = countsByState.get(row.State);
+    if (!counts) return null;
+    const ratio = counts.datacenter_count_2025 > 0
+      ? Math.min(1, counts.datacenter_count_2021 / counts.datacenter_count_2025) : 0;
+    return {
+      count2021: counts.datacenter_count_2021,
+      count2025: counts.datacenter_count_2025,
+      growth: counts.datacenter_count_2025 - counts.datacenter_count_2021,
+      energy2021: row.Scaled_power_consumption_MWh * ratio,
+      water2021:  row.Water_footprint_m3 * ratio,
+      carbon2021: row.Carbon_footprint_tonsCO2e * ratio,
+      energyAdded: Math.max(0, row.Scaled_power_consumption_MWh * (1 - ratio)),
+      waterAdded:  Math.max(0, row.Water_footprint_m3 * (1 - ratio)),
+      carbonAdded: Math.max(0, row.Carbon_footprint_tonsCO2e * (1 - ratio)),
+      energy2025: row.Scaled_power_consumption_MWh,
+      water2025:  row.Water_footprint_m3,
+      carbon2025: row.Carbon_footprint_tonsCO2e,
+    };
+  }).filter(Boolean) as NonNullable<ReturnType<typeof focusRows[0] extends never ? never : (row: StateRow) => unknown>>[];
+
+  const zero = { count2021:0,count2025:0,growth:0,energy2021:0,water2021:0,carbon2021:0,energyAdded:0,waterAdded:0,carbonAdded:0,energy2025:0,water2025:0,carbon2025:0 };
+  const totals = (estimateRows as typeof zero[]).reduce((s, r) => ({
+    count2021:   s.count2021   + r.count2021,
+    count2025:   s.count2025   + r.count2025,
+    growth:      s.growth      + r.growth,
+    energy2021:  s.energy2021  + r.energy2021,
+    water2021:   s.water2021   + r.water2021,
+    carbon2021:  s.carbon2021  + r.carbon2021,
+    energyAdded: s.energyAdded + r.energyAdded,
+    waterAdded:  s.waterAdded  + r.waterAdded,
+    carbonAdded: s.carbonAdded + r.carbonAdded,
+    energy2025:  s.energy2025  + r.energy2025,
+    water2025:   s.water2025   + r.water2025,
+    carbon2025:  s.carbon2025  + r.carbon2025,
+  }), zero);
+  const hasSelection = estimateRows.length > 0;
+  const growthPct = totals.count2021 > 0 ? (totals.growth / totals.count2021) * 100 : 0;
+  const maxFP = Math.max(totals.energy2025, totals.water2025, totals.carbon2025, 1);
+  const stateLabel = selected ? benchmarkTitle : 'Select a state on the map';
 
   return (
-    <div className="national-benchmark">
-      <div className="benchmark-title">
-        <span>National Average Comparison</span>
-        <strong>{selectedLabel}</strong>
+    <div className="analytics-panel">
+      {/* ── Header ── */}
+      <div className="analytics-panel-header">
+        <div className="analytics-panel-titles">
+          <span className="analytics-panel-tag">State Analytics</span>
+          <strong className="analytics-panel-state">{stateLabel}</strong>
+        </div>
       </div>
+
+      {/* ── Section 1: National benchmark cards ── */}
+      <div className="analytics-section-label">National Average Comparison</div>
+
       <div className="benchmark-grid">
-        <BenchmarkCard label="Footprint score" value={selected?.score ?? null} national={national.score} suffix="" />
-        <BenchmarkCard label="2021 data centers" value={selected?.dc2021 ?? null} national={national.dc2021} suffix="" />
-        <BenchmarkCard label="2025 data centers" value={selected?.dc2025 ?? null} national={national.dc2025} suffix="" />
-        <BenchmarkCard label="DC growth" value={selected?.growth ?? null} national={national.growth} suffix="" signed />
+        <BenchmarkCard label="Footprint score" value={selected?.score  ?? null} national={national.score}  suffix="" />
+        <BenchmarkCard label="★ 2021 DCs"      value={selected?.dc2021 ?? null} national={national.dc2021} suffix="" />
+        <BenchmarkCard label="■ 2025 DCs"      value={selected?.dc2025 ?? null} national={national.dc2025} suffix="" />
+
+        {/* DC growth card — expanded with footprint rows inside */}
+        <div className="benchmark-card benchmark-card-expanded">
+          {/* header: same as BenchmarkCard */}
+          <div className="benchmark-card-head">
+            <span>DC growth</span>
+            <strong>{selected?.growth != null ? `${selected.growth > 0 ? '+' : ''}${selected.growth.toFixed(1)}` : 'Select'}</strong>
+          </div>
+          <div className="benchmark-bars">
+            <div>
+              <span>Selected</span>
+              <i style={{ width: `${selected?.growth != null ? Math.min(100, (Math.abs(selected.growth) / Math.max(Math.abs(selected.growth), Math.abs(national.growth), 1)) * 100) : 0}%` }} />
+            </div>
+            <div>
+              <span>U.S. avg</span>
+              <i style={{ width: `${Math.min(100, (Math.abs(national.growth) / Math.max(Math.abs(selected?.growth ?? 0), Math.abs(national.growth), 1)) * 100)}%` }} />
+            </div>
+          </div>
+          <em className={selected?.growth != null && selected.growth - national.growth > 0 ? 'above' : 'below'}>
+            {selected?.growth != null
+              ? `${(selected.growth - national.growth) > 0 ? '+' : ''}${(selected.growth - national.growth).toFixed(1)} vs U.S. avg`
+              : `U.S. avg +${national.growth.toFixed(1)}`}
+          </em>
+
+          {/* Footprint comparison rows inside the card */}
+          <div className="benchmark-fp-rows">
+            {([
+              { label: 'Combined', sel: selected?.score,  nat: national.score,  unit: 'score', color: '#f97316' },
+              { label: 'Energy',   sel: selected?.energy, nat: national.energy, unit: 'M MWh', color: '#c4392c' },
+              { label: 'Water',    sel: selected?.water,  nat: national.water,  unit: 'M m³',  color: '#0891b2' },
+              { label: 'Carbon',   sel: selected?.carbon, nat: national.carbon, unit: 'K tCO₂e', color: '#7c3aed' },
+            ] as const).map(({ label, sel, nat, unit, color }) => {
+              const max = Math.max(Math.abs(sel ?? 0), Math.abs(nat), 1);
+              const selPct = sel != null ? Math.min(100, (Math.abs(sel) / max) * 100) : 0;
+              const natPct = Math.min(100, (Math.abs(nat) / max) * 100);
+              const delta = sel != null ? sel - nat : null;
+              return (
+                <div key={label} className="benchmark-fp-row">
+                  <span className="benchmark-fp-label">{label}</span>
+                  <div className="benchmark-fp-bars">
+                    <div className="benchmark-fp-bar-row">
+                      <span>Sel.</span>
+                      <div className="benchmark-fp-track">
+                        <div style={{ width: `${selPct}%`, background: color, height: '100%', borderRadius: 3 }} />
+                      </div>
+                      <span className="benchmark-fp-val">{sel != null ? sel.toFixed(1) : '—'} {unit}</span>
+                    </div>
+                    <div className="benchmark-fp-bar-row">
+                      <span>Avg</span>
+                      <div className="benchmark-fp-track">
+                        <div style={{ width: `${natPct}%`, background: '#94a3b8', height: '100%', borderRadius: 3 }} />
+                      </div>
+                      <span className="benchmark-fp-val">{nat.toFixed(1)} {unit}</span>
+                    </div>
+                  </div>
+                  {delta != null && (
+                    <span className={`benchmark-fp-delta ${delta > 0 ? 'above' : 'below'}`}>
+                      {delta > 0 ? '+' : ''}{delta.toFixed(1)}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </div>
+
+
+      {/* ── Divider ── */}
+      <div className="analytics-panel-divider" />
+
+      {/* ── Section 2: Growth impact ── */}
+      <div className="analytics-section-label">
+        2021 → 2025 Growth Impact
+        {hasSelection && (
+          <span className="analytics-growth-summary">
+            {totals.count2021}→{totals.count2025} DCs ({totals.growth >= 0 ? '+' : ''}{totals.growth}, {growthPct.toFixed(1)}%)
+          </span>
+        )}
+      </div>
+
+      {!hasSelection && (
+        <p className="analytics-empty-hint">
+          Select one or more states to see how the 2021→2025 data center increase maps to energy, water, and carbon.
+        </p>
+      )}
+
+      {hasSelection && (
+        <div className="growth-impact-bars">
+          <GrowthImpactMetric label="Energy" unit="MWh"   baseline={totals.energy2021} total={totals.energy2025} max={maxFP} color="#c4392c" />
+          <GrowthImpactMetric label="Water"  unit="m³"    baseline={totals.water2021}  total={totals.water2025}  max={maxFP} color="#0891b2" />
+          <GrowthImpactMetric label="Carbon" unit="tCO₂e" baseline={totals.carbon2021} total={totals.carbon2025} max={maxFP} color="#7c3aed" />
+        </div>
+      )}
+
+      <p className="analytics-footnote">
+        Estimate assumes constant footprint per DC; 2021 baseline back-calculated from count ratio.
+      </p>
     </div>
   );
 }
@@ -467,192 +618,57 @@ function BenchmarkCard({
   );
 }
 
-function DatacenterGrowthImpact({
-  rows,
-  benchmarkRows,
-  activeState,
-  countsByState,
-}: {
-  rows: StateRow[];
-  benchmarkRows: StateRow[];
-  activeState: string | null;
-  countsByState: Map<string, DatacenterCountRow>;
-}) {
-  const focusRows = benchmarkRows.length > 0
-    ? benchmarkRows
-    : activeState
-      ? rows.filter(row => row.State === activeState)
-      : [];
-  const estimateRows = focusRows
-    .map(row => {
-      const counts = countsByState.get(row.State);
-      if (!counts) return null;
-      const ratio2021 = counts.datacenter_count_2025 > 0
-        ? Math.min(1, counts.datacenter_count_2021 / counts.datacenter_count_2025)
-        : 0;
-      const energy2021 = row.Scaled_power_consumption_MWh * ratio2021;
-      const water2021 = row.Water_footprint_m3 * ratio2021;
-      const carbon2021 = row.Carbon_footprint_tonsCO2e * ratio2021;
-      return {
-        state: row.State,
-        count2021: counts.datacenter_count_2021,
-        count2025: counts.datacenter_count_2025,
-        growth: counts.datacenter_count_2025 - counts.datacenter_count_2021,
-        energy2021,
-        water2021,
-        carbon2021,
-        energyAdded: Math.max(0, row.Scaled_power_consumption_MWh - energy2021),
-        waterAdded: Math.max(0, row.Water_footprint_m3 - water2021),
-        carbonAdded: Math.max(0, row.Carbon_footprint_tonsCO2e - carbon2021),
-        energy2025: row.Scaled_power_consumption_MWh,
-        water2025: row.Water_footprint_m3,
-        carbon2025: row.Carbon_footprint_tonsCO2e,
-      };
-    })
-    .filter(Boolean) as {
-      state: string;
-      count2021: number;
-      count2025: number;
-      growth: number;
-      energy2021: number;
-      water2021: number;
-      carbon2021: number;
-      energyAdded: number;
-      waterAdded: number;
-      carbonAdded: number;
-      energy2025: number;
-      water2025: number;
-      carbon2025: number;
-    }[];
-  const totals = estimateRows.reduce(
-    (sum, row) => ({
-      count2021: sum.count2021 + row.count2021,
-      count2025: sum.count2025 + row.count2025,
-      growth: sum.growth + row.growth,
-      energy2021: sum.energy2021 + row.energy2021,
-      water2021: sum.water2021 + row.water2021,
-      carbon2021: sum.carbon2021 + row.carbon2021,
-      energyAdded: sum.energyAdded + row.energyAdded,
-      waterAdded: sum.waterAdded + row.waterAdded,
-      carbonAdded: sum.carbonAdded + row.carbonAdded,
-      energy2025: sum.energy2025 + row.energy2025,
-      water2025: sum.water2025 + row.water2025,
-      carbon2025: sum.carbon2025 + row.carbon2025,
-    }),
-    {
-      count2021: 0,
-      count2025: 0,
-      growth: 0,
-      energy2021: 0,
-      water2021: 0,
-      carbon2021: 0,
-      energyAdded: 0,
-      waterAdded: 0,
-      carbonAdded: 0,
-      energy2025: 0,
-      water2025: 0,
-      carbon2025: 0,
-    },
-  );
-  const hasSelection = estimateRows.length > 0;
-  const label = hasSelection
-    ? estimateRows.length === 1
-      ? STATE_NAMES[estimateRows[0].state] ?? estimateRows[0].state
-      : `${estimateRows.length} selected states`
-    : 'Select states on the map';
-  const growthPct = totals.count2021 > 0 ? (totals.growth / totals.count2021) * 100 : 0;
-  const maxFootprint = Math.max(totals.energy2025, totals.water2025, totals.carbon2025, 1);
-
-  return (
-    <div className="growth-impact-panel">
-      <div className="growth-impact-head">
-        <div>
-          <span>2021 → 2025 Growth Impact</span>
-          <strong>{label}</strong>
-        </div>
-        <p>
-          {hasSelection
-            ? `Data centers increased from ${formatFull(totals.count2021)} to ${formatFull(totals.count2025)} (${totals.growth >= 0 ? '+' : ''}${formatFull(totals.growth)}, ${growthPct.toFixed(1)}%). Estimated growth-linked footprint is shown below.`
-            : 'Select one or more states to estimate how the 2021→2025 data center increase maps to energy, water, and carbon footprint.'}
-        </p>
-      </div>
-      <div className="growth-impact-counts">
-        <div><span>2021 data centers</span><strong>{hasSelection ? formatFull(totals.count2021) : 'Select'}</strong></div>
-        <div><span>2025 data centers</span><strong>{hasSelection ? formatFull(totals.count2025) : 'Select'}</strong></div>
-        <div><span>Increase</span><strong>{hasSelection ? `${totals.growth >= 0 ? '+' : ''}${formatFull(totals.growth)}` : 'Select'}</strong></div>
-      </div>
-      <div className="growth-impact-bars">
-        <GrowthImpactMetric
-          label="Energy"
-          unit="MWh"
-          baseline={totals.energy2021}
-          added={totals.energyAdded}
-          total={totals.energy2025}
-          max={maxFootprint}
-          available={hasSelection}
-        />
-        <GrowthImpactMetric
-          label="Water"
-          unit="m3"
-          baseline={totals.water2021}
-          added={totals.waterAdded}
-          total={totals.water2025}
-          max={maxFootprint}
-          available={hasSelection}
-        />
-        <GrowthImpactMetric
-          label="Carbon"
-          unit="tCO2e"
-          baseline={totals.carbon2021}
-          added={totals.carbonAdded}
-          total={totals.carbon2025}
-          max={maxFootprint}
-          available={hasSelection}
-        />
-      </div>
-      <div className="growth-impact-note">
-        Estimate assumes 2025 footprint per data center is constant, then back-estimates a 2021 baseline from 2021 center counts.
-      </div>
-    </div>
-  );
-}
 
 function GrowthImpactMetric({
   label,
   unit,
   baseline,
-  added,
   total,
   max,
-  available,
+  color,
 }: {
   label: string;
   unit: string;
-  baseline: number;
-  added: number;
-  total: number;
-  max: number;
-  available: boolean;
+  baseline: number;   // estimated 2021 value
+  total: number;      // actual 2025 value
+  max: number;        // scale denominator
+  color: string;
 }) {
-  const baselinePct = available ? Math.max(3, (baseline / max) * 100) : 0;
-  const addedPct = available ? Math.max(added > 0 ? 3 : 0, (added / max) * 100) : 0;
-  const addedShare = total > 0 ? (added / total) * 100 : 0;
+  const pct2021 = Math.max(2, (baseline / max) * 100);
+  const pct2025 = Math.max(2, (total   / max) * 100);
+  const delta   = total - baseline;
+  const deltaPct = baseline > 0 ? (delta / baseline) * 100 : 0;
+  const grew    = delta > 0;
+  const fell    = delta < 0;
 
   return (
-    <div className="growth-impact-row">
-      <div className="growth-impact-label">
-        <span>{label}</span>
-        <strong>{available ? `${formatFull(total)} ${unit}` : 'Select states'}</strong>
+    <div className="gim-row">
+      {/* metric label */}
+      <span className="gim-label">{label}</span>
+
+      {/* two bars: 2021 (faded) then 2025 (solid) */}
+      <div className="gim-bars">
+        <div className="gim-bar-row">
+          <span className="gim-year">★ 2021</span>
+          <div className="gim-track">
+            <div className="gim-bar gim-bar-2021" style={{ width: `${pct2021}%`, background: color, opacity: 0.28 }} />
+          </div>
+          <span className="gim-val">{formatFull(baseline)} {unit}</span>
+        </div>
+        <div className="gim-bar-row">
+          <span className="gim-year">■ 2025</span>
+          <div className="gim-track">
+            <div className="gim-bar gim-bar-2025" style={{ width: `${pct2025}%`, background: color }} />
+          </div>
+          <span className="gim-val">{formatFull(total)} {unit}</span>
+        </div>
       </div>
-      <div className="growth-impact-track">
-        <i className="growth-baseline" style={{ width: `${baselinePct}%` }} />
-        <i className="growth-added" style={{ width: `${addedPct}%` }} />
-      </div>
-      <div className="growth-impact-meta">
-        <span>2021 est. {available ? formatFull(baseline) : '-'}</span>
-        <b>growth-linked +{available ? formatFull(added) : '-'} {unit}</b>
-        <em>{available ? `${addedShare.toFixed(1)}% of 2025 footprint` : ''}</em>
-      </div>
+
+      {/* delta badge */}
+      <span className={`gim-delta ${grew ? 'grew' : fell ? 'fell' : 'flat'}`}>
+        {grew ? '▲' : fell ? '▼' : '—'} {grew ? '+' : ''}{formatFull(delta)} {unit}
+        <em>{deltaPct !== 0 ? `${deltaPct > 0 ? '+' : ''}${deltaPct.toFixed(1)}%` : ''}</em>
+      </span>
     </div>
   );
 }
@@ -709,6 +725,24 @@ function PortfolioPanel({
     (sum, row) => sum + (countsByState.get(row.State)?.datacenter_count_2025 ?? 0), 0,
   );
   const portfolioGrowth = portfolioTotal2025 - portfolioTotal2021;
+
+  // Estimated 2021 footprints (back-calculated via DC count ratio)
+  const footprint2021 = portfolioRows.reduce((sum, row) => {
+    const dc = countsByState.get(row.State);
+    const ratio = dc && dc.datacenter_count_2025 > 0
+      ? Math.min(1, dc.datacenter_count_2021 / dc.datacenter_count_2025) : 0;
+    return {
+      energy: sum.energy + row.Scaled_power_consumption_MWh * ratio,
+      water:  sum.water  + row.Water_footprint_m3 * ratio,
+      carbon: sum.carbon + row.Carbon_footprint_tonsCO2e * ratio,
+    };
+  }, { energy: 0, water: 0, carbon: 0 });
+  const footprintDelta = {
+    energy: totals.energy - footprint2021.energy,
+    water:  totals.water  - footprint2021.water,
+    carbon: totals.carbon - footprint2021.carbon,
+  };
+
   const nationalDcTotals = [...countsByState.values()].reduce(
     (sum, row) => ({
       count2021: sum.count2021 + row.datacenter_count_2021,
@@ -773,10 +807,59 @@ function PortfolioPanel({
                   </em>
                 </div>
                 <div className="h2h-metrics">
-                  <div><span>Energy</span><strong>{formatFull(row.Scaled_power_consumption_MWh)}</strong></div>
-                  <div><span>Water</span><strong>{formatFull(row.Water_footprint_m3)}</strong></div>
-                  <div><span>Carbon</span><strong>{formatFull(row.Carbon_footprint_tonsCO2e)}</strong></div>
+                  <div><span>Energy</span><strong>{formatFull(row.Scaled_power_consumption_MWh)} MWh</strong></div>
+                  <div><span>Water</span><strong>{formatFull(row.Water_footprint_m3)} m³</strong></div>
+                  <div><span>Carbon</span><strong>{formatFull(row.Carbon_footprint_tonsCO2e)} tCO₂e</strong></div>
                 </div>
+
+                {/* Footprint 2021 vs 2025 — two bars per metric */}
+                {dc && dc.datacenter_count_2025 > 0 && (
+                  (() => {
+                    const ratio = Math.min(1, dc.datacenter_count_2021 / dc.datacenter_count_2025);
+                    const metrics = [
+                      { label: 'Energy', v21: row.Scaled_power_consumption_MWh * ratio, v25: row.Scaled_power_consumption_MWh, unit: 'MWh',   color: '#c4392c' },
+                      { label: 'Water',  v21: row.Water_footprint_m3 * ratio,            v25: row.Water_footprint_m3,           unit: 'm³',    color: '#0891b2' },
+                      { label: 'Carbon', v21: row.Carbon_footprint_tonsCO2e * ratio,     v25: row.Carbon_footprint_tonsCO2e,    unit: 'tCO₂e', color: '#7c3aed' },
+                    ] as const;
+                    const maxVal = Math.max(...metrics.map(m => m.v25), 1);
+                    return (
+                      <div className="h2h-growth">
+                        <div className="h2h-growth-title">Footprint change 2021 → 2025 (est.)</div>
+                        {metrics.map(m => {
+                          const pct21 = Math.max(2, (m.v21 / maxVal) * 100);
+                          const pct25 = Math.max(2, (m.v25 / maxVal) * 100);
+                          const delta = m.v25 - m.v21;
+                          const deltaPct = m.v21 > 0 ? (delta / m.v21) * 100 : 0;
+                          return (
+                            <div key={m.label} className="h2h-gim-row">
+                              <span className="h2h-gim-label">{m.label}</span>
+                              <div className="h2h-gim-bars">
+                                <div className="h2h-gim-bar-row">
+                                  <span>★ 2021</span>
+                                  <div className="h2h-gim-track">
+                                    <div style={{ width: `${pct21}%`, background: m.color, opacity: 0.28, height: '100%', borderRadius: 3 }} />
+                                  </div>
+                                  <span className="h2h-gim-val">{formatFull(m.v21)} {m.unit}</span>
+                                </div>
+                                <div className="h2h-gim-bar-row">
+                                  <span>■ 2025</span>
+                                  <div className="h2h-gim-track">
+                                    <div style={{ width: `${pct25}%`, background: m.color, height: '100%', borderRadius: 3 }} />
+                                  </div>
+                                  <span className="h2h-gim-val">{formatFull(m.v25)} {m.unit}</span>
+                                </div>
+                              </div>
+                              <span className={`h2h-gim-delta ${delta > 0 ? 'grew' : delta < 0 ? 'fell' : 'flat'}`}>
+                                {delta > 0 ? '▲' : delta < 0 ? '▼' : '—'} {delta > 0 ? '+' : ''}{formatFull(delta)} {m.unit}
+                                <em>{deltaPct !== 0 ? `${deltaPct > 0 ? '+' : ''}${deltaPct.toFixed(0)}%` : ''}</em>
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()
+                )}
               </article>
             </Fragment>
           );
@@ -803,10 +886,30 @@ function PortfolioPanel({
             <strong>{portfolioTotal2025}</strong>
             <em>{nationalDcTotals.count2025 > 0 ? `${((portfolioTotal2025 / nationalDcTotals.count2025) * 100).toFixed(1)}% of U.S.` : 'selected total'}</em>
           </div>
-          <div>
+          <div className="combined-growth-cell">
             <span>Growth</span>
             <strong>{portfolioGrowth > 0 ? '+' : ''}{portfolioGrowth}</strong>
             <em>2021 to 2025</em>
+            <div className="combined-fp-delta">
+              <div>
+                <span>⚡ Energy</span>
+                <b className={footprintDelta.energy >= 0 ? 'up' : 'down'}>
+                  {footprintDelta.energy >= 0 ? '+' : ''}{formatFull(footprintDelta.energy)} MWh
+                </b>
+              </div>
+              <div>
+                <span>💧 Water</span>
+                <b className={footprintDelta.water >= 0 ? 'up' : 'down'}>
+                  {footprintDelta.water >= 0 ? '+' : ''}{formatFull(footprintDelta.water)} m³
+                </b>
+              </div>
+              <div>
+                <span>☁️ Carbon</span>
+                <b className={footprintDelta.carbon >= 0 ? 'up' : 'down'}>
+                  {footprintDelta.carbon >= 0 ? '+' : ''}{formatFull(footprintDelta.carbon)} tCO₂e
+                </b>
+              </div>
+            </div>
           </div>
         </div>
       </section>
