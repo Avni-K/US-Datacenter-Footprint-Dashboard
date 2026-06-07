@@ -80,8 +80,6 @@ export function DatacenterGrowthMap({ dataByState, rows }: Props) {
     return <div className="map-loading">Loading map…</div>;
   }
 
-  const containerW = containerRef.current?.clientWidth ?? 900;
-
   return (
     <div>
       {/* Metric selector */}
@@ -168,7 +166,7 @@ export function DatacenterGrowthMap({ dataByState, rows }: Props) {
           <div
             className="map-tooltip"
             style={{
-              left: cursor.x > containerW - 220 ? cursor.x - 200 : cursor.x + 14,
+              left: cursor.x > 690 ? cursor.x - 200 : cursor.x + 14,
               top: Math.max(cursor.y - 110, 4),
             }}
           >
