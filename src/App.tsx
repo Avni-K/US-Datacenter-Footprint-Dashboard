@@ -102,7 +102,11 @@ export default function App() {
       <div className="dash-inner">
         <header className="dash-header">
           <h1>U.S. Data Center Environmental Footprint</h1>
-          <p>State-level energy demand, water use, and carbon emissions from data center operations</p>
+          <p>
+            Explore where U.S. data centers are concentrated, how their environmental footprint
+            varies by state and watershed, and how the mapped facility layer changed from the
+            2021 baseline to the 2025 buildout.
+          </p>
         </header>
 
         <div className="tab-bar">
@@ -139,7 +143,13 @@ export default function App() {
               <div className="dash-left-col">
                 <div className="map-panel">
                   <div className="map-panel-header">
-                    <div className="panel-title">Combined Environmental Footprint by State</div>
+                    <div>
+                      <div className="panel-title">Combined Environmental Footprint by State</div>
+                      <p className="panel-note">
+                        State color combines energy, water, and carbon footprint; markers show
+                        2021 and 2025 data center locations for comparison.
+                      </p>
+                    </div>
                     <div className="overlay-controls">
                       <label>
                         <input
@@ -177,6 +187,8 @@ export default function App() {
                   />
                 </div>
                 {selectedStates.length > 0 && (
+                  /* Selected states become a shared comparison set across the map, ranking table,
+                     callouts, and the head-to-head summary below the map. */
                   <PortfolioPanel
                     rows={rows}
                     selectedStates={selectedStates}
@@ -226,6 +238,20 @@ export default function App() {
 
             <SitingRiskTool />
             <Huc8ScarcityMap />
+            <section className="method-note">
+              <div className="panel-title">Methodology and Interpretation Notes</div>
+              <p>
+                The 2021 footprint layer is based on the Siddik/Virginia Tech baseline. The 2021
+                data center locations are derived from historical OpenStreetMap extraction and
+                should be interpreted as a mapped facility proxy, not a complete census. The 2025
+                facility layer uses the IM3 Open Source Data Center Atlas.
+              </p>
+              <p>
+                This dashboard supports exploration and comparison, not causal proof. Facility
+                count, grid mix, facility size, cooling technology, and local water conditions can
+                all affect the environmental footprint.
+              </p>
+            </section>
           </>
         )}
 

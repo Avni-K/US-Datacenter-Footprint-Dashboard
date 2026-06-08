@@ -109,6 +109,8 @@ export function ChoroplethMap({
     const normalizedWeightFor = (key: MetricKey) =>
       weightTotal > 0 ? weights[key] / weightTotal : 1 / keys.length;
 
+    // Normalize each metric against its national maximum before blending, so energy,
+    // water, and carbon can share one readable footprint color scale.
     const scoreFor = (row: StateRow) =>
       d3.sum(keys, key => {
         return (row[key] / (maxByKey.get(key) || 1)) * normalizedWeightFor(key);
@@ -218,6 +220,8 @@ export function ChoroplethMap({
             window.setTimeout(() => {
               blockNextClickRef.current = false;
             }, 0);
+            // Lasso selection uses projected state centroids to keep the interaction fast
+            // while still matching the states users visually brushed on the map.
             const statesInBrush = featureMeta
               .filter(({ state, row, centroid }) =>
                 state &&
